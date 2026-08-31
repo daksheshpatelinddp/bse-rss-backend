@@ -60,33 +60,42 @@ export default {
 async function processBseRss(env) {
   if (!env.BSE_STORE) return 0;
 
-  // Use BSE's native JSON endpoint with browser headers
+  // Primary BSE API Endpoint
   const apiUrl = "https://api.bseindia.com/BseIndiaAPI/api/AnnSubCategoryData/w?categoryId=0&subCategoryId=0&strCat=-1&strPrevDate=&strScrip=";
 
   try {
     const response = await fetch(apiUrl, {
+      method: 'GET',
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
         'Accept': 'application/json, text/plain, */*',
+        'Accept-Language': 'en-US,en;q=0.9',
         'Referer': 'https://www.bseindia.com/',
-        'Origin': 'https://www.bseindia.com'
+        'Origin': 'https://www.bseindia.com',
+        'Sec-Fetch-Dest': 'empty',
+        'Sec-Fetch-Mode': 'cors',
+        'Sec-Fetch-Site': 'same-site'
       }
     });
 
-    if (!response.ok) return 0;
+    if (!response.ok) {
+      console.error("BSE API HTTP Error:", response.status);
+      return 0;
+    }
 
     const data = await response.json();
-    const rawItems = data?.Table || [];
+    const rawItems = data?.Table || data?.Table1 || [];
+    
     if (!Array.isArray(rawItems) || rawItems.length === 0) return 0;
 
-    // Map API fields to frontend template properties
+    // Transform raw BSE API response into expected frontend format
     const items = rawItems.map(item => ({
-      scripCode: String(item.SCRIP_CD || 'N/A'),
-      companyName: item.SLONGNAME || item.NEWSSUB || 'BSE Company',
-      title: item.NEWSSUB || item.HEADLINE || '',
+      scripCode: String(item.SCRIP_CD || item.scrip_cd || 'N/A'),
+      companyName: item.SLONGNAME || item.NEWSSUB || item.scrip_name || 'BSE Company',
+      title: item.NEWSSUB || item.HEADLINE || item.news_subject || '',
       pdfLink: item.ATTACHMENTNAME ? `https://www.bseindia.com/xml-data/corpnotice/attachment/data/${item.ATTACHMENTNAME}` : '',
-      category: item.CATEGORYNAME || 'Other',
-      timestamp: item.NEWS_DT || new Date().toISOString()
+      category: item.CATEGORYNAME || item.category_name || 'Other',
+      timestamp: item.NEWS_DT || item.news_date || new Date().toISOString()
     }));
 
     let whitelistedScrips = [];
@@ -115,7 +124,7 @@ async function processBseRss(env) {
     const cachedRaw = await env.BSE_STORE.get('latest_announcements');
     const cached = cachedRaw ? JSON.parse(cachedRaw) : [];
     
-    // Store latest processed dataset
+    // Fallback to storing raw items if KV is empty
     const listToStore = newAnnouncements.length > 0 ? [...newAnnouncements, ...cached] : items;
     const updated = listToStore.slice(0, 500);
 
@@ -123,16 +132,16 @@ async function processBseRss(env) {
 
     return items.length;
   } catch (err) {
-    console.error("Error fetching BSE announcements:", err);
+    console.error("Error processing BSE feed:", err);
     return 0;
   }
 }
 
 async function triggerAlerts(item, env) {
-  const msg = `🚨 <b>${item.companyName} (${item.scripCode})</b>\n\n` +
+  const msg = ` <b>${item.companyName} (${item.scripCode})</b>\n\n` +
               `<b>Category:</b> ${item.category}\n` +
               `<b>Announcement:</b> ${item.title}\n\n` +
-              `📄 <a href="${item.pdfLink}">View PDF Attachment</a>`;
+              ` <a href="${item.pdfLink}">View PDF Attachment</a>`;
 
   if (env.TELEGRAM_BOT_TOKEN && env.TELEGRAM_CHAT_ID) {
     await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
