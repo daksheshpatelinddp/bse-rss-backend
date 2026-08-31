@@ -6,7 +6,6 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
-    // Standard CORS headers for frontend requests
     const corsHeaders = {
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
@@ -18,7 +17,7 @@ export default {
       return new Response(null, { headers: corsHeaders });
     }
 
-    // API route to get latest stored announcements
+    // Serve JSON for both root '/' and '/api/announcements'
     if (url.pathname === '/api/announcements' || url.pathname === '/') {
       const data = await env.BSE_STORE.get('latest_announcements', { type: 'json' });
       return new Response(JSON.stringify(data || []), {
@@ -27,7 +26,7 @@ export default {
       });
     }
 
-    // Manual test route to force run the XML pull immediately
+    // Manual test route to execute XML fetching directly
     if (url.pathname === '/api/trigger-cron') {
       await processBseRss(env);
       const data = await env.BSE_STORE.get('latest_announcements', { type: 'json' });
@@ -37,8 +36,8 @@ export default {
       });
     }
 
-    return new Response(JSON.stringify({ message: 'BSE Worker Active' }), { 
-      status: 200,
+    return new Response(JSON.stringify({ error: 'Not Found' }), { 
+      status: 404,
       headers: corsHeaders 
     });
   }
@@ -74,8 +73,6 @@ async function processBseRss(env) {
     if (newAnnouncements.length > 0) {
       const cached = await env.BSE_STORE.get('latest_announcements', { type: 'json' }) || [];
       const updated = [...newAnnouncements, ...cached].slice(0, 500);
-      
-      // Store raw object/array directly (KV handles JSON serialization)
       await env.BSE_STORE.put('latest_announcements', JSON.stringify(updated), { expirationTtl: 172800 });
     }
   } catch (err) {
@@ -110,10 +107,10 @@ function parseBseXmlSimple(xml) {
 }
 
 async function triggerAlerts(item, env) {
-  const msg = ` <b>${item.companyName} (${item.scripCode})</b>\n\n` +
+  const msg = `🚨 <b>${item.companyName} (${item.scripCode})</b>\n\n` +
               `<b>Category:</b> ${item.category}\n` +
               `<b>Announcement:</b> ${item.title}\n\n` +
-              ` <a href="${item.pdfLink}">View PDF Attachment</a>`;
+              `📄 <a href="${item.pdfLink}">View PDF Attachment</a>`;
 
   if (env.TELEGRAM_BOT_TOKEN && env.TELEGRAM_CHAT_ID) {
     await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
