@@ -1,0 +1,11 @@
+{
+  "name": "bse-rss-backend",
+  "main": "index.js",
+  "compatibility_date": "2026-01-01",
+  "triggers": {
+    "crons": [
+      "0-59/1 0-12 * * *",
+      "0-59/10 13-23 * * *"
+    ]
+  }
+}
