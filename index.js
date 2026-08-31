@@ -6,58 +6,80 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
+    // Standard CORS headers for frontend requests
+    const corsHeaders = {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type',
+      'Content-Type': 'application/json',
+    };
+
     if (request.method === "OPTIONS") {
-      return new Response(null, {
-        headers: {
-          "Access-Control-Allow-Origin": "*",
-          "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-          "Access-Control-Allow-Headers": "Content-Type",
-        },
-      });
+      return new Response(null, { headers: corsHeaders });
     }
 
-    if (url.pathname === '/api/announcements') {
+    // API route to get latest stored announcements
+    if (url.pathname === '/api/announcements' || url.pathname === '/') {
       const data = await env.BSE_STORE.get('latest_announcements', { type: 'json' });
       return new Response(JSON.stringify(data || []), {
-        headers: { 
-          'Content-Type': 'application/json',
-          'Access-Control-Allow-Origin': '*' 
-        }
+        status: 200,
+        headers: corsHeaders,
       });
     }
 
-    return new Response('BSE Worker Active', { status: 200 });
+    // Manual test route to force run the XML pull immediately
+    if (url.pathname === '/api/trigger-cron') {
+      await processBseRss(env);
+      const data = await env.BSE_STORE.get('latest_announcements', { type: 'json' });
+      return new Response(JSON.stringify({ success: true, count: (data || []).length }), {
+        status: 200,
+        headers: corsHeaders,
+      });
+    }
+
+    return new Response(JSON.stringify({ message: 'BSE Worker Active' }), { 
+      status: 200,
+      headers: corsHeaders 
+    });
   }
 };
 
 async function processBseRss(env) {
-  const rssUrl = "https://beta.bseindia.com/data/xml/announcements.xml";
-  const response = await fetch(rssUrl);
-  const xmlText = await response.text();
+  try {
+    const rssUrl = "https://beta.bseindia.com/data/xml/announcements.xml";
+    const response = await fetch(rssUrl, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
+    });
+    const xmlText = await response.text();
 
-  const items = parseBseXmlSimple(xmlText);
-  const whitelistedScrips = await env.BSE_STORE.get('watchlist', { type: 'json' }) || [];
-  
-  let newAnnouncements = [];
+    const items = parseBseXmlSimple(xmlText);
+    const whitelistedScrips = await env.BSE_STORE.get('watchlist', { type: 'json' }) || [];
+    
+    let newAnnouncements = [];
 
-  for (const item of items) {
-    const kvKey = `ann:${item.scripCode}:${item.timestamp}`;
-    const exists = await env.BSE_STORE.get(kvKey);
+    for (const item of items) {
+      const kvKey = `ann:${item.scripCode}:${item.timestamp}`;
+      const exists = await env.BSE_STORE.get(kvKey);
 
-    if (!exists) {
-      await env.BSE_STORE.put(kvKey, '1', { expirationTtl: 172800 });
-      newAnnouncements.push(item);
+      if (!exists) {
+        await env.BSE_STORE.put(kvKey, '1', { expirationTtl: 172800 });
+        newAnnouncements.push(item);
 
-      if (whitelistedScrips.includes(item.scripCode)) {
-        await triggerAlerts(item, env);
+        if (whitelistedScrips.includes(item.scripCode)) {
+          await triggerAlerts(item, env);
+        }
       }
     }
-  }
 
-  if (newAnnouncements.length > 0) {
-    const cached = await env.BSE_STORE.get('latest_announcements', { type: 'json' }) || [];
-    const updated = [...newAnnouncements, ...cached].slice(0, 500);
-    await env.BSE_STORE.put('latest_announcements', JSON.stringify(updated), { expirationTtl: 172800 });
+    if (newAnnouncements.length > 0) {
+      const cached = await env.BSE_STORE.get('latest_announcements', { type: 'json' }) || [];
+      const updated = [...newAnnouncements, ...cached].slice(0, 500);
+      
+      // Store raw object/array directly (KV handles JSON serialization)
+      await env.BSE_STORE.put('latest_announcements', JSON.stringify(updated), { expirationTtl: 172800 });
+    }
+  } catch (err) {
+    console.error("Error processing BSE RSS feed:", err);
   }
 }
 
@@ -88,10 +110,10 @@ function parseBseXmlSimple(xml) {
 }
 
 async function triggerAlerts(item, env) {
-  const msg = `🚨 <b>${item.companyName} (${item.scripCode})</b>\n\n` +
+  const msg = ` <b>${item.companyName} (${item.scripCode})</b>\n\n` +
               `<b>Category:</b> ${item.category}\n` +
               `<b>Announcement:</b> ${item.title}\n\n` +
-              `📄 <a href="${item.pdfLink}">View PDF Attachment</a>`;
+              ` <a href="${item.pdfLink}">View PDF Attachment</a>`;
 
   if (env.TELEGRAM_BOT_TOKEN && env.TELEGRAM_CHAT_ID) {
     await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
