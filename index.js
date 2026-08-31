@@ -17,29 +17,38 @@ export default {
       return new Response(null, { headers: corsHeaders });
     }
 
-    // Serve JSON for both root '/' and '/api/announcements'
-    if (url.pathname === '/api/announcements' || url.pathname === '/') {
-      const data = await env.BSE_STORE.get('latest_announcements', { type: 'json' });
-      return new Response(JSON.stringify(data || []), {
-        status: 200,
+    try {
+      // Serve announcements on root / or /api/announcements
+      if (url.pathname === '/api/announcements' || url.pathname === '/') {
+        const rawData = await env.BSE_STORE.get('latest_announcements');
+        const items = rawData ? JSON.parse(rawData) : [];
+        return new Response(JSON.stringify(items), {
+          status: 200,
+          headers: corsHeaders,
+        });
+      }
+
+      // Manual execution route
+      if (url.pathname === '/api/trigger-cron') {
+        await processBseRss(env);
+        const rawData = await env.BSE_STORE.get('latest_announcements');
+        const items = rawData ? JSON.parse(rawData) : [];
+        return new Response(JSON.stringify({ success: true, count: items.length }), {
+          status: 200,
+          headers: corsHeaders,
+        });
+      }
+
+      return new Response(JSON.stringify({ error: 'Not Found' }), { 
+        status: 404,
+        headers: corsHeaders 
+      });
+    } catch (err) {
+      return new Response(JSON.stringify({ error: err.message }), {
+        status: 500,
         headers: corsHeaders,
       });
     }
-
-    // Manual test route to execute XML fetching directly
-    if (url.pathname === '/api/trigger-cron') {
-      await processBseRss(env);
-      const data = await env.BSE_STORE.get('latest_announcements', { type: 'json' });
-      return new Response(JSON.stringify({ success: true, count: (data || []).length }), {
-        status: 200,
-        headers: corsHeaders,
-      });
-    }
-
-    return new Response(JSON.stringify({ error: 'Not Found' }), { 
-      status: 404,
-      headers: corsHeaders 
-    });
   }
 };
 
@@ -52,7 +61,14 @@ async function processBseRss(env) {
     const xmlText = await response.text();
 
     const items = parseBseXmlSimple(xmlText);
-    const whitelistedScrips = await env.BSE_STORE.get('watchlist', { type: 'json' }) || [];
+    
+    let whitelistedScrips = [];
+    try {
+      const watchlistRaw = await env.BSE_STORE.get('watchlist');
+      whitelistedScrips = watchlistRaw ? JSON.parse(watchlistRaw) : [];
+    } catch (e) {
+      whitelistedScrips = [];
+    }
     
     let newAnnouncements = [];
 
@@ -71,7 +87,8 @@ async function processBseRss(env) {
     }
 
     if (newAnnouncements.length > 0) {
-      const cached = await env.BSE_STORE.get('latest_announcements', { type: 'json' }) || [];
+      const cachedRaw = await env.BSE_STORE.get('latest_announcements');
+      const cached = cachedRaw ? JSON.parse(cachedRaw) : [];
       const updated = [...newAnnouncements, ...cached].slice(0, 500);
       await env.BSE_STORE.put('latest_announcements', JSON.stringify(updated), { expirationTtl: 172800 });
     }
@@ -107,10 +124,10 @@ function parseBseXmlSimple(xml) {
 }
 
 async function triggerAlerts(item, env) {
-  const msg = `🚨 <b>${item.companyName} (${item.scripCode})</b>\n\n` +
+  const msg = ` <b>${item.companyName} (${item.scripCode})</b>\n\n` +
               `<b>Category:</b> ${item.category}\n` +
               `<b>Announcement:</b> ${item.title}\n\n` +
-              `📄 <a href="${item.pdfLink}">View PDF Attachment</a>`;
+              ` <a href="${item.pdfLink}">View PDF Attachment</a>`;
 
   if (env.TELEGRAM_BOT_TOKEN && env.TELEGRAM_CHAT_ID) {
     await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
