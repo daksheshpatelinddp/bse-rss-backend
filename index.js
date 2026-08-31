@@ -18,6 +18,13 @@ export default {
     }
 
     try {
+      if (!env.BSE_STORE) {
+        return new Response(JSON.stringify({ error: "BSE_STORE KV binding is missing in Cloudflare settings." }), {
+          status: 500,
+          headers: corsHeaders,
+        });
+      }
+
       // Serve announcements on root / or /api/announcements
       if (url.pathname === '/api/announcements' || url.pathname === '/') {
         const rawData = await env.BSE_STORE.get('latest_announcements');
@@ -30,10 +37,10 @@ export default {
 
       // Manual execution route
       if (url.pathname === '/api/trigger-cron') {
-        await processBseRss(env);
+        const resultCount = await processBseRss(env);
         const rawData = await env.BSE_STORE.get('latest_announcements');
         const items = rawData ? JSON.parse(rawData) : [];
-        return new Response(JSON.stringify({ success: true, count: items.length }), {
+        return new Response(JSON.stringify({ success: true, newFetched: resultCount, totalInStore: items.length }), {
           status: 200,
           headers: corsHeaders,
         });
@@ -53,11 +60,15 @@ export default {
 };
 
 async function processBseRss(env) {
+  if (!env.BSE_STORE) return 0;
+
   try {
     const rssUrl = "https://beta.bseindia.com/data/xml/announcements.xml";
     const response = await fetch(rssUrl, {
       headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
     });
+
+    if (!response.ok) return 0;
     const xmlText = await response.text();
 
     const items = parseBseXmlSimple(xmlText);
@@ -80,7 +91,7 @@ async function processBseRss(env) {
         await env.BSE_STORE.put(kvKey, '1', { expirationTtl: 172800 });
         newAnnouncements.push(item);
 
-        if (whitelistedScrips.includes(item.scripCode)) {
+        if (Array.isArray(whitelistedScrips) && whitelistedScrips.includes(item.scripCode)) {
           await triggerAlerts(item, env);
         }
       }
@@ -92,8 +103,11 @@ async function processBseRss(env) {
       const updated = [...newAnnouncements, ...cached].slice(0, 500);
       await env.BSE_STORE.put('latest_announcements', JSON.stringify(updated), { expirationTtl: 172800 });
     }
+
+    return newAnnouncements.length;
   } catch (err) {
     console.error("Error processing BSE RSS feed:", err);
+    return 0;
   }
 }
 
@@ -124,10 +138,10 @@ function parseBseXmlSimple(xml) {
 }
 
 async function triggerAlerts(item, env) {
-  const msg = ` <b>${item.companyName} (${item.scripCode})</b>\n\n` +
+  const msg = `🚨 <b>${item.companyName} (${item.scripCode})</b>\n\n` +
               `<b>Category:</b> ${item.category}\n` +
               `<b>Announcement:</b> ${item.title}\n\n` +
-              ` <a href="${item.pdfLink}">View PDF Attachment</a>`;
+              `📄 <a href="${item.pdfLink}">View PDF Attachment</a>`;
 
   if (env.TELEGRAM_BOT_TOKEN && env.TELEGRAM_CHAT_ID) {
     await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
