@@ -19,13 +19,12 @@ export default {
 
     try {
       if (!env.BSE_STORE) {
-        return new Response(JSON.stringify({ error: "BSE_STORE KV binding is missing in Cloudflare settings." }), {
+        return new Response(JSON.stringify({ error: "BSE_STORE KV binding missing" }), {
           status: 500,
           headers: corsHeaders,
         });
       }
 
-      // Serve announcements on root / or /api/announcements
       if (url.pathname === '/api/announcements' || url.pathname === '/') {
         const rawData = await env.BSE_STORE.get('latest_announcements');
         const items = rawData ? JSON.parse(rawData) : [];
@@ -35,12 +34,11 @@ export default {
         });
       }
 
-      // Manual execution route
       if (url.pathname === '/api/trigger-cron') {
-        const resultCount = await processBseRss(env);
+        const count = await processBseRss(env);
         const rawData = await env.BSE_STORE.get('latest_announcements');
         const items = rawData ? JSON.parse(rawData) : [];
-        return new Response(JSON.stringify({ success: true, newFetched: resultCount, totalInStore: items.length }), {
+        return new Response(JSON.stringify({ success: true, newFetched: count, totalInStore: items.length }), {
           status: 200,
           headers: corsHeaders,
         });
@@ -62,17 +60,35 @@ export default {
 async function processBseRss(env) {
   if (!env.BSE_STORE) return 0;
 
+  // Use BSE's native JSON endpoint with browser headers
+  const apiUrl = "https://api.bseindia.com/BseIndiaAPI/api/AnnSubCategoryData/w?categoryId=0&subCategoryId=0&strCat=-1&strPrevDate=&strScrip=";
+
   try {
-    const rssUrl = "https://beta.bseindia.com/data/xml/announcements.xml";
-    const response = await fetch(rssUrl, {
-      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
+    const response = await fetch(apiUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'Accept': 'application/json, text/plain, */*',
+        'Referer': 'https://www.bseindia.com/',
+        'Origin': 'https://www.bseindia.com'
+      }
     });
 
     if (!response.ok) return 0;
-    const xmlText = await response.text();
 
-    const items = parseBseXmlSimple(xmlText);
-    
+    const data = await response.json();
+    const rawItems = data?.Table || [];
+    if (!Array.isArray(rawItems) || rawItems.length === 0) return 0;
+
+    // Map API fields to frontend template properties
+    const items = rawItems.map(item => ({
+      scripCode: String(item.SCRIP_CD || 'N/A'),
+      companyName: item.SLONGNAME || item.NEWSSUB || 'BSE Company',
+      title: item.NEWSSUB || item.HEADLINE || '',
+      pdfLink: item.ATTACHMENTNAME ? `https://www.bseindia.com/xml-data/corpnotice/attachment/data/${item.ATTACHMENTNAME}` : '',
+      category: item.CATEGORYNAME || 'Other',
+      timestamp: item.NEWS_DT || new Date().toISOString()
+    }));
+
     let whitelistedScrips = [];
     try {
       const watchlistRaw = await env.BSE_STORE.get('watchlist');
@@ -80,9 +96,8 @@ async function processBseRss(env) {
     } catch (e) {
       whitelistedScrips = [];
     }
-    
-    let newAnnouncements = [];
 
+    let newAnnouncements = [];
     for (const item of items) {
       const kvKey = `ann:${item.scripCode}:${item.timestamp}`;
       const exists = await env.BSE_STORE.get(kvKey);
@@ -97,44 +112,20 @@ async function processBseRss(env) {
       }
     }
 
-    if (newAnnouncements.length > 0) {
-      const cachedRaw = await env.BSE_STORE.get('latest_announcements');
-      const cached = cachedRaw ? JSON.parse(cachedRaw) : [];
-      const updated = [...newAnnouncements, ...cached].slice(0, 500);
-      await env.BSE_STORE.put('latest_announcements', JSON.stringify(updated), { expirationTtl: 172800 });
-    }
+    const cachedRaw = await env.BSE_STORE.get('latest_announcements');
+    const cached = cachedRaw ? JSON.parse(cachedRaw) : [];
+    
+    // Store latest processed dataset
+    const listToStore = newAnnouncements.length > 0 ? [...newAnnouncements, ...cached] : items;
+    const updated = listToStore.slice(0, 500);
 
-    return newAnnouncements.length;
+    await env.BSE_STORE.put('latest_announcements', JSON.stringify(updated), { expirationTtl: 172800 });
+
+    return items.length;
   } catch (err) {
-    console.error("Error processing BSE RSS feed:", err);
+    console.error("Error fetching BSE announcements:", err);
     return 0;
   }
-}
-
-function parseBseXmlSimple(xml) {
-  const items = [];
-  const itemMatches = xml.match(/<item>([\s\S]*?)<\/item>/g) || [];
-
-  for (const match of itemMatches) {
-    const title = (match.match(/<title>([\s\S]*?)<\/title>/) || [])[1] || '';
-    const link = (match.match(/<link>([\s\S]*?)<\/link>/) || [])[1] || '';
-    const category = (match.match(/<category>([\s\S]*?)<\/category>/) || [])[1] || 'Other';
-    const pubDate = (match.match(/<pubDate>([\s\S]*?)<\/pubDate>/) || [])[1] || '';
-
-    const scripMatch = title.match(/^(.*?)\s*\((\d{6})\)/);
-    const companyName = scripMatch ? scripMatch[1].trim() : title;
-    const scripCode = scripMatch ? scripMatch[2] : 'N/A';
-
-    items.push({
-      scripCode,
-      companyName,
-      title,
-      pdfLink: link.trim(),
-      category: category.trim() || 'Other',
-      timestamp: pubDate
-    });
-  }
-  return items;
 }
 
 async function triggerAlerts(item, env) {
